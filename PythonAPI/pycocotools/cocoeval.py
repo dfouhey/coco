@@ -1,11 +1,46 @@
-__author__ = 'tsungyi'
+__author__ = 'tsungyi,dfouhey'
 
 import numpy as np
 import datetime
 import time
 from collections import defaultdict
 from . import mask as maskUtils
+from . import bcipr as bciUtils
+import scipy.stats as stats
 import copy
+import md5
+
+#signatures for the replicates that should be generated for datasets with 
+#the same size as the COCO minival, val, and test sets. If they don't match, 
+#then we raise an exception
+_md5replicateSignatures = {5000: '16d20e7a43fcf00dd3626516d817e64d',
+                           40504:'6c5db3b9da0a6d203300a29bb8261299',
+                           81434:'c842933e485dfc5a275ac7c462459b22'}
+
+def _replicatesToCI(allData, replicates, alpha):
+    '''
+    Return a (1-alpha) CI using the median-bias corrected method, which offers
+    a good tradeoff: the next best is the bias corrected and accelerated one,
+    which requires jackknife samples, which entails as many evaluations as
+    there are data points.
+
+    See Efron, The jackknife, the bootstrap and other resampling plans, pp 118
+
+    :param allData: results of f(allData)
+    :param replicates: a Rx1 matrix containing f(replicate_i) 
+    :param alpha: the parameter for the width of the CI
+    :return: a 1x2 matrix containing the median-bias corrected CI
+    '''
+    alpha2 = alpha/2
+
+    z0 = stats.norm.ppf(np.mean(replicates <= allData))
+    za = stats.norm.ppf(alpha2)
+
+    #the actual percentiles to take 
+    higha = stats.norm.cdf(2*z0-za)
+    lowa = stats.norm.cdf(2*z0+za)
+    return np.percentile(replicates,[lowa*100,higha*100])
+
 
 class COCOeval:
     # Interface for evaluating detection on the Microsoft COCO dataset.
@@ -49,6 +84,11 @@ class COCOeval:
     #  counts     - [T,R,K,A,M] parameter dimensions (see above)
     #  precision  - [TxRxKxAxM] precision for every evaluation setting
     #  recall     - [TxKxAxM] max recall for every evaluation setting
+    # and if p.runBootstrap is true, where B is the number of replicates
+    #  APBCI      - [TxBxKxAxM] average precision for every evaluation setting
+    #               per-bootstrap replicate
+    #  RBCI       - [TxBxKxAxM] max recall for every evaluation setting
+    #               per-bootstrap replicate
     # Note: precision and recall==-1 for settings with no gt objects.
     #
     # See also coco, mask, pycocoDemo, pycocoEvalDemo
@@ -56,6 +96,7 @@ class COCOeval:
     # Microsoft COCO Toolbox.      version 2.0
     # Data, paper, and tutorials available at:  http://mscoco.org/
     # Code written by Piotr Dollar and Tsung-Yi Lin, 2015.
+    # Bootstrapping code written by David Fouhey, 2017
     # Licensed under the Simplified BSD License [see coco/license.txt]
     def __init__(self, cocoGt=None, cocoDt=None, iouType='segm'):
         '''
@@ -313,6 +354,7 @@ class COCOeval:
                 'dtIgnore':     dtIg,
             }
 
+        
     def accumulate(self, p = None):
         '''
         Accumulate per image evaluation results and store the result in self.eval
@@ -335,6 +377,7 @@ class COCOeval:
         precision   = -np.ones((T,R,K,A,M)) # -1 for the precision of absent categories
         recall      = -np.ones((T,K,A,M))
 
+
         # create dictionary for future indexing
         _pe = self._paramsEval
         catIds = _pe.catIds if _pe.useCats else [-1]
@@ -349,6 +392,42 @@ class COCOeval:
         i_list = [n for n, i in enumerate(p.imgIds)  if i in setI]
         I0 = len(_pe.imgIds)
         A0 = len(_pe.areaRng)
+
+
+        if p.runBootstrap:
+            #setup bootstrap
+            APBCI = -np.empty((T,p.bootstrapCount,K,A,M),dtype=np.float)
+            RBCI = -np.empty((T,p.bootstrapCount,K,A,M),dtype=np.float)
+
+            #save state
+            rstate = np.random.get_state()
+            np.random.seed(1)
+
+            #map the image ids -> 0, ... N-1 "indexes" for replicates
+            listId = list(setI)
+
+            imageIdToIndex = {listId[i]: i for i in range(len(listId))}
+
+            #a bootstrap sample is just reweighting the points; this counts
+            bciCounts = np.zeros((p.bootstrapCount,len(listId)))
+            for ri in range(p.bootstrapCount):
+                #convert the replicate into a count
+                samp = np.random.randint(0,len(listId),len(listId))
+                bciCounts[ri,:] = np.bincount(samp,minlength=len(listId))
+
+            imageCount = len(listId)
+            if imageCount in _md5replicateSignatures or True:
+                #if we're evaluating something that looks coco-sized, verify 
+                #the replicates are the same
+                m = md5.new() 
+                m.update("".join(map(lambda f:str(int(f)),bciCounts.ravel().tolist())))
+                bootstrapDigest = m.hexdigest()
+                if bootstrapDigest != _md5replicateSignatures[imageCount]:
+                    print "WARNING\nNumpy not producing same bootstrap samples; results may not be comparable"
+
+            np.random.set_state(rstate)
+
+
         # retrieve E at each category, area range, and max number of detections
         for k, k0 in enumerate(k_list):
             Nk = k0*A0*I0
@@ -376,6 +455,7 @@ class COCOeval:
 
                     tp_sum = np.cumsum(tps, axis=1).astype(dtype=np.float)
                     fp_sum = np.cumsum(fps, axis=1).astype(dtype=np.float)
+
                     for t, (tp, fp) in enumerate(zip(tp_sum, fp_sum)):
                         tp = np.array(tp)
                         fp = np.array(fp)
@@ -397,13 +477,22 @@ class COCOeval:
                             if pr[i] > pr[i-1]:
                                 pr[i-1] = pr[i]
 
-                        inds = np.searchsorted(rc, p.recThrs, side='left')
+                        indsPR = np.searchsorted(rc, p.recThrs, side='left')
                         try:
-                            for ri, pi in enumerate(inds):
+                            for ri, pi in enumerate(indsPR):
                                 q[ri] = pr[pi]
                         except:
                             pass
                         precision[t,:,k,a,m] = np.array(q)
+                    
+                    if p.runBootstrap:
+                        #generate index lists for gtIgnore and dtMatches/dtIgnore
+                        imgIds = np.concatenate([np.tile(imageIdToIndex[e['image_id']],e['dtMatches'][:,0:maxDet].shape[1]) for e in E],axis=0)[inds]
+                        npigImgIds = np.concatenate([np.tile(imageIdToIndex[e['image_id']],e['gtIgnore'].shape[0]) for e in E],axis=0)[gtIg==0]
+
+                        #call the evaluation code, casting the True/Falses to 1/0s
+                        APBCI[:,:,k,a,m],RBCI[:,:,k,a,m] = bciUtils.bcipr(bciCounts,imgIds,npigImgIds,tps.astype(np.float),fps.astype(np.float),p.recThrs)
+
         self.eval = {
             'params': p,
             'counts': [T, R, K, A, M],
@@ -411,17 +500,31 @@ class COCOeval:
             'precision': precision,
             'recall':   recall,
         }
+
+        if p.runBootstrap:
+            self.eval['APBCI'] = APBCI
+            self.eval['RBCI'] = RBCI
+
         toc = time.time()
         print('DONE (t={:0.2f}s).'.format( toc-tic))
+        
 
     def summarize(self):
         '''
         Compute and display summary metrics for evaluation results.
-        Note this functin can *only* be applied on the default parameter setting
+        Note this function can *only* be applied on the default parameter setting
         '''
-        def _summarize( ap=1, iouThr=None, areaRng='all', maxDets=100 ):
+        runBootstrap = self.params.runBootstrap
+        numClasses = self.eval['precision'].shape[2]
+
+        def _summarize( ap=1, iouThr=None, areaRng='all', maxDets=100, classId=None ):
+            '''
+            Returns a float if bootstrap is false and a 1x3 matrix [mean,low,high] other
+            '''
             p = self.params
-            iStr = ' {:<18} {} @[ IoU={:<9} | area={:>6s} | maxDets={:>3d} ] = {:0.3f}'
+            iStr = ' {:<18} {} @[ IoU={:<9} | area={:>6s} | maxDets={:>3d} ] = {:s}'
+            resultStr = "{:0.3f}" if not self.params.runBootstrap else "{:0.3f} ({:0.3f},{:0.3f})"
+
             titleStr = 'Average Precision' if ap == 1 else 'Average Recall'
             typeStr = '(AP)' if ap==1 else '(AR)'
             iouStr = '{:0.2f}:{:0.2f}'.format(p.iouThrs[0], p.iouThrs[-1]) \
@@ -429,54 +532,90 @@ class COCOeval:
 
             aind = [i for i, aRng in enumerate(p.areaRngLbl) if aRng == areaRng]
             mind = [i for i, mDet in enumerate(p.maxDets) if mDet == maxDets]
+
+            cind = slice(0,numClasses) if classId == None else classId
+
             if ap == 1:
                 # dimension of precision: [TxRxKxAxM]
                 s = self.eval['precision']
+                if runBootstrap: replicates = self.eval['APBCI'][:,:,cind,aind,mind]
                 # IoU
                 if iouThr is not None:
                     t = np.where(iouThr == p.iouThrs)[0]
                     s = s[t]
-                s = s[:,:,:,aind,mind]
+                    if runBootstrap: replicates = replicates[t]
+                s = s[:,:,cind,aind,mind]
+
             else:
                 # dimension of recall: [TxKxAxM]
                 s = self.eval['recall']
+                if runBootstrap: replicates = self.eval['RBCI'][:,:,cind,aind,mind]
                 if iouThr is not None:
                     t = np.where(iouThr == p.iouThrs)[0]
                     s = s[t]
-                s = s[:,:,aind,mind]
+                    if runBootstrap: replicates = replicates[t]
+                s = s[:,cind,aind,mind]
+
             if len(s[s>-1])==0:
                 mean_s = -1
             else:
                 mean_s = np.mean(s[s>-1])
-            print(iStr.format(titleStr, typeStr, iouStr, areaRng, maxDets, mean_s))
-            return mean_s
+
+            #make result string
+            if runBootstrap:
+                #make the replicates the first dimension
+                replicates = np.moveaxis(replicates,1,0)
+
+                #ignore invalid samples; this is very rare, and there's no good solution; this
+                #imitates the standard eval code
+                replicates = np.nanmean(replicates,axis=tuple(range(1,len(replicates.shape))))
+                replicates = replicates[np.isnan(replicates)==False]
+                bci = _replicatesToCI(mean_s, replicates, p.bootstrapAlpha)
+                result = resultStr.format(mean_s,bci[0],bci[1])
+            else:
+                result = resultStr.format(mean_s)
+
+            if classId is None:
+                print(iStr.format(titleStr, typeStr, iouStr, areaRng, maxDets, result))
+
+            return np.array([mean_s,bci[0],bci[1]]) if runBootstrap else mean_s
         def _summarizeDets():
-            stats = np.zeros((12,))
-            stats[0] = _summarize(1)
-            stats[1] = _summarize(1, iouThr=.5, maxDets=self.params.maxDets[2])
-            stats[2] = _summarize(1, iouThr=.75, maxDets=self.params.maxDets[2])
-            stats[3] = _summarize(1, areaRng='small', maxDets=self.params.maxDets[2])
-            stats[4] = _summarize(1, areaRng='medium', maxDets=self.params.maxDets[2])
-            stats[5] = _summarize(1, areaRng='large', maxDets=self.params.maxDets[2])
-            stats[6] = _summarize(0, maxDets=self.params.maxDets[0])
-            stats[7] = _summarize(0, maxDets=self.params.maxDets[1])
-            stats[8] = _summarize(0, maxDets=self.params.maxDets[2])
-            stats[9] = _summarize(0, areaRng='small', maxDets=self.params.maxDets[2])
-            stats[10] = _summarize(0, areaRng='medium', maxDets=self.params.maxDets[2])
-            stats[11] = _summarize(0, areaRng='large', maxDets=self.params.maxDets[2])
+
+            stats = np.zeros((12+numClasses,3)) if runBootstrap else np.zeros((12,1))
+
+            stats[0,:] = _summarize(1)
+            stats[1,:] = _summarize(1, iouThr=.5, maxDets=self.params.maxDets[2])
+            stats[2,:] = _summarize(1, iouThr=.75, maxDets=self.params.maxDets[2])
+            stats[3,:] = _summarize(1, areaRng='small', maxDets=self.params.maxDets[2])
+            stats[4,:] = _summarize(1, areaRng='medium', maxDets=self.params.maxDets[2])
+            stats[5,:] = _summarize(1, areaRng='large', maxDets=self.params.maxDets[2])
+            stats[6,:] = _summarize(0, maxDets=self.params.maxDets[0])
+            stats[7,:] = _summarize(0, maxDets=self.params.maxDets[1])
+            stats[8,:] = _summarize(0, maxDets=self.params.maxDets[2])
+            stats[9,:] = _summarize(0, areaRng='small', maxDets=self.params.maxDets[2])
+            stats[10,:] = _summarize(0, areaRng='medium', maxDets=self.params.maxDets[2])
+            stats[11,:] = _summarize(0, areaRng='large', maxDets=self.params.maxDets[2])
+
+            if runBootstrap:
+                for k in range(numClasses):
+                    stats[12+k,:] = _summarize(1,classId=k)
+
+            stats = np.squeeze(stats)
             return stats
         def _summarizeKps():
-            stats = np.zeros((10,))
-            stats[0] = _summarize(1, maxDets=20)
-            stats[1] = _summarize(1, maxDets=20, iouThr=.5)
-            stats[2] = _summarize(1, maxDets=20, iouThr=.75)
-            stats[3] = _summarize(1, maxDets=20, areaRng='medium')
-            stats[4] = _summarize(1, maxDets=20, areaRng='large')
-            stats[5] = _summarize(0, maxDets=20)
-            stats[6] = _summarize(0, maxDets=20, iouThr=.5)
-            stats[7] = _summarize(0, maxDets=20, iouThr=.75)
-            stats[8] = _summarize(0, maxDets=20, areaRng='medium')
-            stats[9] = _summarize(0, maxDets=20, areaRng='large')
+            stats = np.zeros((10,3)) if runBootstrap else np.zeros((10,1))
+            stats[0,:] = _summarize(1, maxDets=20)
+            stats[1,:] = _summarize(1, maxDets=20, iouThr=.5)
+            stats[2,:] = _summarize(1, maxDets=20, iouThr=.75)
+            stats[3,:] = _summarize(1, maxDets=20, areaRng='medium')
+            stats[4,:] = _summarize(1, maxDets=20, areaRng='large')
+            stats[5,:] = _summarize(0, maxDets=20)
+            stats[6,:] = _summarize(0, maxDets=20, iouThr=.5)
+            stats[7,:] = _summarize(0, maxDets=20, iouThr=.75)
+            stats[8,:] = _summarize(0, maxDets=20, areaRng='medium')
+            stats[9,:] = _summarize(0, maxDets=20, areaRng='large')
+
+            stats = np.squeeze(stats)
             return stats
         if not self.eval:
             raise Exception('Please run accumulate() first')
@@ -486,6 +625,115 @@ class COCOeval:
         elif iouType == 'keypoints':
             summarize = _summarizeKps
         self.stats = summarize()
+
+    def __sub__(self,other):
+        '''
+        Take two cocoEval instances and return the one representing the 
+        difference of the results. This is primarily useful for computing
+        paired bootstraps
+        :param other: another cocoEval instance
+        :return: a new cocoEval instance representing the difference
+        '''
+        diffEval = COCOeval(None,None,self.params.iouType)
+        diffEval.params = self.params
+        if not self.eval or not other.eval:
+            raise Exception("Please run accumulate() first on both operands")
+
+        for k in ['recall','precision','APBCI','RBCI']:
+            if k in self.eval and k in other.eval:
+                diffEval.eval[k] = self.eval[k]-other.eval[k]
+
+        return diffEval
+
+    def rank(self,others):
+        """
+        Compute bootstrapped ranking information for a list of evals. The 
+        metrics that are used are the standard COCO ones, plus one per-class
+        using the main competition criterion.
+
+        :param others: a list of N cocoEval instances 
+        :return: a tuple (A,B) 
+        (A) A Nx3xK array M where M[i,:,k] is the average and CI of method i's 
+            rank on metric k
+
+        (B) a NxNxK array M where M[i,j,k] is the frequency with which method i 
+            is better than method j according to metric k
+
+        """
+        types = [o.params.iouType for o in others]
+        if len(set(types)) != 1:
+            raise Exception("Need to be all the same type")
+
+        if not all((o.eval)):
+            raise Exception("Please run accumulate() on all the arguments.")
+        
+        bootstrappedSize = [0 if 'APBCI' not in o.eval else o.eval['APBCI'].shape[1]]
+        if min(bootstrappedSize) == 0 or len(set(bootstrappedSize)) != 1:
+            raise Exception("Please run accumulate() with bootstrapping on and identical settings")
+        
+        #construct the n evaluation criteria + classes in an extensible way
+        #evalFn = [AP,R] in the standard format -> column with as many rows as replicates
+        numClasses = others[0].eval['APBCI'].shape[2]
+
+        if types[0] in ["segm","bbox"]:
+            evalFunctions = [ \
+                lambda AP,R: np.nanmean(AP[:,:,:,0,-1],axis=(0,2)),
+                lambda AP,R: np.nanmean(AP[0,:,:,0,-1],axis=(1)),
+                lambda AP,R: np.nanmean(AP[5,:,:,0,-1],axis=(1)),
+                lambda AP,R: np.nanmean(AP[:,:,:,1,-1],axis=(0,2)),
+                lambda AP,R: np.nanmean(AP[:,:,:,2,-1],axis=(0,2)),
+                lambda AP,R: np.nanmean(AP[:,:,:,3,-1],axis=(0,2)),
+                lambda AP,R: np.nanmean(R[:,:,:,0,0],axis=(0,2)),
+                lambda AP,R: np.nanmean(R[:,:,:,0,1],axis=(0,2)),
+                lambda AP,R: np.nanmean(R[:,:,:,0,2],axis=(0,2)),
+                lambda AP,R: np.nanmean(R[:,:,:,1,2],axis=(0,2)),
+                lambda AP,R: np.nanmean(R[:,:,:,2,2],axis=(0,2)),
+                lambda AP,R: np.nanmean(R[:,:,:,3,2],axis=(0,2))]
+
+            evfAP = lambda c: (lambda AP,R: np.nanmean(AP[:,:,c,0,-1],axis=0))
+            for i in range(numClasses):
+                evalFunctions.append(evfAP(i))
+
+        else:
+            evalFunctions = [ \
+                    lambda AP,R: np.nanmean(AP[:,:,:,0,0],axis=(0,2)),
+                    lambda AP,R: np.nanmean(AP[0,:,:,0,0],axis=(1)),
+                    lambda AP,R: np.nanmean(AP[5,:,:,0,0],axis=(1)),
+                    lambda AP,R: np.nanmean(AP[:,:,:,1,0],axis=(0,2)),
+                    lambda AP,R: np.nanmean(AP[:,:,:,2,0],axis=(0,2)),
+                    lambda AP,R: np.nanmean(R[:,:,:,0,0],axis=(0,2)),
+                    lambda AP,R: np.nanmean(R[0,:,:,0,0],axis=(1)),
+                    lambda AP,R: np.nanmean(R[5,:,:,0,0],axis=(1)),
+                    lambda AP,R: np.nanmean(R[:,:,:,1,0],axis=(0,2)),
+                    lambda AP,R: np.nanmean(R[:,:,:,2,0],axis=(0,2))]
+
+        numReplicates = others[0].eval['APBCI'].shape[1]
+        numInstances = len(others)
+        numEvals = len(evalFunctions)
+
+        replicateStats = np.zeros((numReplicates,numInstances))
+        ranks = np.zeros((numReplicates,numInstances))
+
+        outperformMatrix = np.zeros((numInstances,numInstances,numEvals))
+        rankCI = np.zeros((numInstances,3,numEvals))
+
+        for evi,evf in enumerate(evalFunctions):
+            for oi,o in enumerate(others):
+                replicateStats[:,oi] = evf(o.eval['APBCI'],o.eval['RBCI'])
+
+            for oi in range(len(others)):
+                for oj in range(len(others)):
+                    outperformMatrix[oi,oj,evi] = np.mean(replicateStats[:,oi]>replicateStats[:,oj])
+
+            for bci in range(numReplicates):
+                ranks[bci,:] = stats.rankdata(-replicateStats[bci,:],method='min')
+
+            for oi in range(len(others)): 
+                rankCI[oi,0,evi] = np.mean(ranks[:,oi])
+                #use simple percentile method; the bias correction misbehaves 
+                rankCI[oi,1:,evi] = np.percentile(ranks[:,oi],[100*(self.params.bootstrapAlpha/2),100*(1-self.params.bootstrapAlpha/2)])
+
+        return rankCI, outperformMatrix
 
     def __str__(self):
         self.summarize()
@@ -504,6 +752,9 @@ class Params:
         self.areaRng = [[0 ** 2, 1e5 ** 2], [0 ** 2, 32 ** 2], [32 ** 2, 96 ** 2], [96 ** 2, 1e5 ** 2]]
         self.areaRngLbl = ['all', 'small', 'medium', 'large']
         self.useCats = 1
+        self.runBootstrap = 0
+        self.bootstrapCount = 1000
+        self.bootstrapAlpha = 0.05
 
     def setKpParams(self):
         self.imgIds = []
@@ -515,6 +766,10 @@ class Params:
         self.areaRng = [[0 ** 2, 1e5 ** 2], [32 ** 2, 96 ** 2], [96 ** 2, 1e5 ** 2]]
         self.areaRngLbl = ['all', 'medium', 'large']
         self.useCats = 1
+        self.runBootstrap = 0
+        self.bootstrapCount = 1000
+        self.bootstrapAlpha = 0.05
+
 
     def __init__(self, iouType='segm'):
         if iouType == 'segm' or iouType == 'bbox':

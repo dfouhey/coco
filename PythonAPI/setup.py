@@ -12,6 +12,11 @@ ext_modules = [
         sources=['../common/maskApi.c', 'pycocotools/_mask.pyx'],
         include_dirs = [np.get_include(), '../common'],
         extra_compile_args=['-Wno-cpp', '-Wno-unused-function', '-std=c99'],
+    ),
+    Extension(
+        'pycocotools.bcipr',
+        sources = ['pycocotools/bcipr.pyx'],
+        include_dirs = [np.get_include()]
     )
 ]
 
