@@ -416,14 +416,14 @@ class COCOeval:
                 bciCounts[ri,:] = np.bincount(samp,minlength=len(listId))
 
             imageCount = len(listId)
-            if imageCount in _md5replicateSignatures or True:
+            if imageCount in _md5replicateSignatures and p.verifyBootstrap:
                 #if we're evaluating something that looks coco-sized, verify 
                 #the replicates are the same
                 m = md5.new() 
                 m.update("".join(map(lambda f:str(int(f)),bciCounts.ravel().tolist())))
                 bootstrapDigest = m.hexdigest()
                 if bootstrapDigest != _md5replicateSignatures[imageCount]:
-                    print "WARNING\nNumpy not producing same bootstrap samples; results may not be comparable"
+                    raise Exception("Numpy not producing same bootstrap samples; results may not be comparable")
 
             np.random.set_state(rstate)
 
@@ -755,6 +755,7 @@ class Params:
         self.runBootstrap = 0
         self.bootstrapCount = 1000
         self.bootstrapAlpha = 0.05
+        self.verifyBootstrap = True
 
     def setKpParams(self):
         self.imgIds = []
@@ -769,6 +770,7 @@ class Params:
         self.runBootstrap = 0
         self.bootstrapCount = 1000
         self.bootstrapAlpha = 0.05
+        self.verifyBootstrap = True
 
 
     def __init__(self, iouType='segm'):

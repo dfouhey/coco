@@ -4,7 +4,7 @@
 # Microsoft COCO Toolbox.      version 2.0
 # Data, paper, and tutorials available at:  http://mscoco.org/
 # Code written by Piotr Dollar and Tsung-Yi Lin, 2015.
-# BCI Code written by David Fouhey, 2017
+# BCI Code written by David Fouhey, 2017 
 # Licensed under the Simplified BSD License [see coco/license.txt]
 #**************************************************************************
 
@@ -52,7 +52,6 @@ def bcipr(  np.ndarray[DTYPE_t,ndim=2] bciCounts, \
     cdef int i, ri, pi, t, sub, bci
     cdef DTYPE_t npigBCI, tp, fp, tpsum, fpsum
 
-    #note: switching this to malloc and doubles doesn't makes it way less readable
     cdef np.ndarray[DTYPE_t,ndim=1] q = np.zeros((R,))
     cdef np.ndarray[DTYPE_t,ndim=1] rc = np.zeros((TPS1,))
     cdef np.ndarray[DTYPE_t,ndim=1] pr = np.zeros((TPS1,))
