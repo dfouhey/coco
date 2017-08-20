@@ -13,9 +13,9 @@ import md5
 #signatures for the replicates that should be generated for datasets with 
 #the same size as the COCO minival, val, and test sets. If they don't match, 
 #then we raise an exception
-_md5replicateSignatures = {5000: '16d20e7a43fcf00dd3626516d817e64d',
-                           40504:'6c5db3b9da0a6d203300a29bb8261299',
-                           81434:'c842933e485dfc5a275ac7c462459b22'}
+_md5replicateSignatures = {5000: 'c7485ea1fbd324666c58b04ffeb6f4be',
+                           40504:'e2c034a0030c64c632158c91bffed85f',
+                           81434:'274440b377927259c82d9df0d6fda9d6'}
 
 def _replicatesToCI(allData, replicates, alpha):
     '''
@@ -420,7 +420,7 @@ class COCOeval:
                 #if we're evaluating something that looks coco-sized, verify 
                 #the replicates are the same
                 m = md5.new() 
-                m.update("".join(map(lambda f:str(int(f)),bciCounts.ravel().tolist())))
+                m.update("".join(map(lambda f:str(int(f)),bciCounts[::10,::10].ravel().tolist())))
                 bootstrapDigest = m.hexdigest()
                 if bootstrapDigest != _md5replicateSignatures[imageCount]:
                     raise Exception("Numpy not producing same bootstrap samples; results may not be comparable")
@@ -756,7 +756,7 @@ class Params:
         #Do computations necessary for bootstrapping?
         self.runBootstrap = 0
         #How many to run
-        self.bootstrapCount = 1000
+        self.bootstrapCount = 5000
         #return a (1-alpha) interval
         self.bootstrapAlpha = 0.05
         #print statuses as it goes along (useful since this can take a long time)
@@ -776,7 +776,7 @@ class Params:
         self.areaRngLbl = ['all', 'medium', 'large']
         self.useCats = 1
         self.runBootstrap = 0
-        self.bootstrapCount = 1000
+        self.bootstrapCount = 5000
         self.bootstrapAlpha = 0.05
         self.bootstrapStatus = False
         self.verifyBootstrap = True
