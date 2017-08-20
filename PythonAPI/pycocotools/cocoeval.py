@@ -569,7 +569,9 @@ class COCOeval:
 
                 #ignore invalid samples; this is very rare, and there's no good solution; this
                 #imitates the standard eval code
+                oldError = np.seterr(invalid='ignore')
                 replicates = np.nanmean(replicates,axis=tuple(range(1,len(replicates.shape))))
+                np.seterr(**oldError)
                 replicates = replicates[np.isnan(replicates)==False]
                 bci = _replicatesToCI(mean_s, replicates, p.bootstrapAlpha)
                 result = resultStr.format(mean_s,bci[0],bci[1])
