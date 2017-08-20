@@ -486,6 +486,7 @@ class COCOeval:
                         precision[t,:,k,a,m] = np.array(q)
                     
                     if p.runBootstrap:
+                        if p.bootstrapStatus: print "Bootstrapping %d/%d %d/%d %d/%d" % (k,len(k_list),a,len(a_list),m,len(m_list))
                         #generate index lists for gtIgnore and dtMatches/dtIgnore
                         imgIds = np.concatenate([np.tile(imageIdToIndex[e['image_id']],e['dtMatches'][:,0:maxDet].shape[1]) for e in E],axis=0)[inds]
                         npigImgIds = np.concatenate([np.tile(imageIdToIndex[e['image_id']],e['gtIgnore'].shape[0]) for e in E],axis=0)[gtIg==0]
@@ -752,9 +753,16 @@ class Params:
         self.areaRng = [[0 ** 2, 1e5 ** 2], [0 ** 2, 32 ** 2], [32 ** 2, 96 ** 2], [96 ** 2, 1e5 ** 2]]
         self.areaRngLbl = ['all', 'small', 'medium', 'large']
         self.useCats = 1
+        #Do computations necessary for bootstrapping?
         self.runBootstrap = 0
+        #How many to run
         self.bootstrapCount = 1000
+        #return a (1-alpha) interval
         self.bootstrapAlpha = 0.05
+        #print statuses as it goes along (useful since this can take a long time)
+        self.bootstrapStatus = False
+        #if the number of images matches standard datasets, whether to verify 
+        #we're producing identical resamples
         self.verifyBootstrap = True
 
     def setKpParams(self):
@@ -770,6 +778,7 @@ class Params:
         self.runBootstrap = 0
         self.bootstrapCount = 1000
         self.bootstrapAlpha = 0.05
+        self.bootstrapStatus = False
         self.verifyBootstrap = True
 
 
