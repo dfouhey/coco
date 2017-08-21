@@ -9,6 +9,7 @@ from . import bcipr as bciUtils
 import scipy.stats as stats
 import copy
 import md5
+import warnings
 
 #signatures for the replicates that should be generated for datasets with 
 #the same size as the COCO minival, val, and test sets. If they don't match, 
@@ -569,9 +570,11 @@ class COCOeval:
 
                 #ignore invalid samples; this is very rare, and there's no good solution; this
                 #imitates the standard eval code
-                oldError = np.seterr(invalid='ignore')
-                replicates = np.nanmean(replicates,axis=tuple(range(1,len(replicates.shape))))
-                np.seterr(**oldError)
+                
+                with warnings.catch_warnings():
+                    warnings.filterwarnings('ignore','Mean of empty slice')
+                    replicates = np.nanmean(replicates,axis=tuple(range(1,len(replicates.shape))))
+
                 replicates = replicates[np.isnan(replicates)==False]
                 bci = _replicatesToCI(mean_s, replicates, p.bootstrapAlpha)
                 result = resultStr.format(mean_s,bci[0],bci[1])
