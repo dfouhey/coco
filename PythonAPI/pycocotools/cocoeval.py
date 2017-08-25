@@ -11,12 +11,7 @@ import copy
 import md5
 import warnings
 
-#signatures for the replicates that should be generated for datasets with 
-#the same size as the COCO minival, val, and test sets. If they don't match, 
-#then we raise an exception
-_md5replicateSignatures = {5000: 'c7485ea1fbd324666c58b04ffeb6f4be',
-                           40504:'e2c034a0030c64c632158c91bffed85f',
-                           81434:'274440b377927259c82d9df0d6fda9d6'}
+import pdb
 
 def _replicatesToCI(allData, replicates, alpha):
     '''
@@ -400,9 +395,9 @@ class COCOeval:
             APBCI = -np.empty((T,p.bootstrapCount,K,A,M),dtype=np.float)
             RBCI = -np.empty((T,p.bootstrapCount,K,A,M),dtype=np.float)
 
-            #save state
-            rstate = np.random.get_state()
-            np.random.seed(1)
+            #fix state
+            randomGenerator = np.random.RandomState()
+            randomGenerator.seed(1)
 
             #map the image ids -> 0, ... N-1 "indexes" for replicates
             listId = list(setI)
@@ -413,20 +408,8 @@ class COCOeval:
             bciCounts = np.zeros((p.bootstrapCount,len(listId)))
             for ri in range(p.bootstrapCount):
                 #convert the replicate into a count
-                samp = np.random.randint(0,len(listId),len(listId))
+                samp = randomGenerator.randint(0,len(listId),len(listId))
                 bciCounts[ri,:] = np.bincount(samp,minlength=len(listId))
-
-            imageCount = len(listId)
-            if imageCount in _md5replicateSignatures and p.verifyBootstrap:
-                #if we're evaluating something that looks coco-sized, verify 
-                #the replicates are the same
-                m = md5.new() 
-                m.update("".join(map(lambda f:str(int(f)),bciCounts[::10,::10].ravel().tolist())))
-                bootstrapDigest = m.hexdigest()
-                if bootstrapDigest != _md5replicateSignatures[imageCount]:
-                    raise Exception("Numpy not producing same bootstrap samples; results may not be comparable")
-
-            np.random.set_state(rstate)
 
 
         # retrieve E at each category, area range, and max number of detections
@@ -495,6 +478,8 @@ class COCOeval:
                         #call the evaluation code, casting the True/Falses to 1/0s
                         APBCI[:,:,k,a,m],RBCI[:,:,k,a,m] = bciUtils.bcipr(bciCounts,imgIds,npigImgIds,tps.astype(np.float),fps.astype(np.float),p.recThrs)
 
+
+
         self.eval = {
             'params': p,
             'counts': [T, R, K, A, M],
@@ -506,6 +491,12 @@ class COCOeval:
         if p.runBootstrap:
             self.eval['APBCI'] = APBCI
             self.eval['RBCI'] = RBCI
+
+            if p.verifyBootstrap:
+                m = md5.new() 
+                m.update("".join(map(lambda f:str(int(f)),bciCounts[::10,::10].ravel().tolist())))
+                bootstrapDigest = m.hexdigest()
+                self.eval['bootstrapDigest'] = bootstrapDigest
 
         toc = time.time()
         print('DONE (t={:0.2f}s).'.format( toc-tic))
@@ -632,6 +623,28 @@ class COCOeval:
             summarize = _summarizeKps
         self.stats = summarize()
 
+    def __verify(self,others):
+        '''
+        Check to make sure that it's meaningful to compare/subtract a set of
+        instances.
+        :param others: the set of instances
+        :returns: nothing; raises an exception
+        '''
+        #check 
+        if not(all(o.eval for o in others)):
+            raise Exception("Please run accumulate on all arguments()")
+        types = [o.params.iouType for o in others]
+        if len(set(types)) != 1:
+            raise Exception("Arguments much have the same type")
+
+        bootstrappedSize = [0 if 'APBCI' not in o.eval else o.eval['APBCI'].shape[1] for o in others]
+        hashes = ['' if 'bootstrapDigest' not in o.eval else o.eval['bootstrapDigest'] for o in others]
+        if min(bootstrappedSize) == 0 or len(set(bootstrappedSize)) != 1:
+            raise Exception("Please run accumulate() with bootstrapping on and identical settings")
+
+        if len(set(hashes)) != 1 and self.params.verifyBootstrap:
+            raise Exception("Bootstrap hashes do not match; re-evaluate on the same machine")
+
     def __sub__(self,other):
         '''
         Take two cocoEval instances and return the one representing the 
@@ -642,8 +655,10 @@ class COCOeval:
         '''
         diffEval = COCOeval(None,None,self.params.iouType)
         diffEval.params = self.params
+        self.__verify([self,other])
         if not self.eval or not other.eval:
             raise Exception("Please run accumulate() first on both operands")
+    
 
         for k in ['recall','precision','APBCI','RBCI']:
             if k in self.eval and k in other.eval:
@@ -658,30 +673,25 @@ class COCOeval:
         using the main competition criterion.
 
         :param others: a list of N cocoEval instances 
-        :return: a tuple (A,B) 
+        :return: a tuple (A,B,C) 
         (A) A Nx3xK array M where M[i,:,k] is the average and CI of method i's 
             rank on metric k
 
-        (B) a NxNxK array M where M[i,j,k] is the frequency with which method i 
+        (B) A NxNxK array M where M[i,j,k] is the frequency with which method i 
             is better than method j according to metric k
 
-        """
-        types = [o.params.iouType for o in others]
-        if len(set(types)) != 1:
-            raise Exception("Need to be all the same type")
+        (C) A NxKxR array M where M[i,j,:] is the distribution of ranks of 
+            method i on metric k
 
-        if not all((o.eval)):
-            raise Exception("Please run accumulate() on all the arguments.")
-        
-        bootstrappedSize = [0 if 'APBCI' not in o.eval else o.eval['APBCI'].shape[1]]
-        if min(bootstrappedSize) == 0 or len(set(bootstrappedSize)) != 1:
-            raise Exception("Please run accumulate() with bootstrapping on and identical settings")
+        """
+        self.__verify(others)
         
         #construct the n evaluation criteria + classes in an extensible way
         #evalFn = [AP,R] in the standard format -> column with as many rows as replicates
         numClasses = others[0].eval['APBCI'].shape[2]
 
-        if types[0] in ["segm","bbox"]:
+        iouType = others[0].params.iouType
+        if iouType in ["segm","bbox"]:
             evalFunctions = [ \
                 lambda AP,R: np.nanmean(AP[:,:,:,0,-1],axis=(0,2)),
                 lambda AP,R: np.nanmean(AP[0,:,:,0,-1],axis=(1)),
@@ -718,10 +728,10 @@ class COCOeval:
         numEvals = len(evalFunctions)
 
         replicateStats = np.zeros((numReplicates,numInstances))
-        ranks = np.zeros((numReplicates,numInstances))
 
         outperformMatrix = np.zeros((numInstances,numInstances,numEvals))
         rankCI = np.zeros((numInstances,3,numEvals))
+        ranks = np.zeros((numInstances,numEvals,numReplicates))
 
         for evi,evf in enumerate(evalFunctions):
             for oi,o in enumerate(others):
@@ -732,14 +742,14 @@ class COCOeval:
                     outperformMatrix[oi,oj,evi] = np.mean(replicateStats[:,oi]>replicateStats[:,oj])
 
             for bci in range(numReplicates):
-                ranks[bci,:] = stats.rankdata(-replicateStats[bci,:],method='min')
+                ranks[:,evi,bci] = stats.rankdata(-replicateStats[bci,:],method='min')
 
             for oi in range(len(others)): 
-                rankCI[oi,0,evi] = np.mean(ranks[:,oi])
+                rankCI[oi,0,evi] = np.mean(ranks[oi,evi,:])
                 #use simple percentile method; the bias correction misbehaves 
-                rankCI[oi,1:,evi] = np.percentile(ranks[:,oi],[100*(self.params.bootstrapAlpha/2),100*(1-self.params.bootstrapAlpha/2)])
+                rankCI[oi,1:,evi] = np.percentile(ranks[oi,evi,:],[100*(self.params.bootstrapAlpha/2),100*(1-self.params.bootstrapAlpha/2)])
 
-        return rankCI, outperformMatrix
+        return rankCI, outperformMatrix, ranks
 
     def __str__(self):
         self.summarize()
