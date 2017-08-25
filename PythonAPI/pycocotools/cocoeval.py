@@ -776,8 +776,7 @@ class Params:
         self.bootstrapAlpha = 0.05
         #print statuses as it goes along (useful since this can take a long time)
         self.bootstrapStatus = False
-        #if the number of images matches standard datasets, whether to verify 
-        #we're producing identical resamples
+        #make sure that the bootstrap samples match
         self.verifyBootstrap = True
 
     def setKpParams(self):
